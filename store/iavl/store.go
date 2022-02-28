@@ -3,7 +3,6 @@ package iavl
 import (
 	"errors"
 	"fmt"
-	"github.com/tendermint/tendermint/libs/log"
 	"io"
 	"time"
 
@@ -42,28 +41,18 @@ type Store struct {
 // LoadStore returns an IAVL Store as a CommitKVStore. Internally, it will load the
 // store's version (id) from the provided DB. An error is returned if the version
 // fails to load, or if called with a positive version on an empty tree.
-func LoadStore(db dbm.DB, logger log.Logger, key types.StoreKey, id types.CommitID, lazyLoading bool, cacheSize int) (types.CommitKVStore, error) {
-	return LoadStoreWithInitialVersion(db, logger, key, id, lazyLoading, 0, cacheSize)
+func LoadStore(db dbm.DB, id types.CommitID, lazyLoading bool, cacheSize int) (types.CommitKVStore, error) {
+	return LoadStoreWithInitialVersion(db, id, lazyLoading, 0, cacheSize)
 }
 
 // LoadStoreWithInitialVersion returns an IAVL Store as a CommitKVStore setting its initialVersion
 // to the one given. Internally, it will load the store's version (id) from the
 // provided DB. An error is returned if the version fails to load, or if called with a positive
 // version on an empty tree.
-func LoadStoreWithInitialVersion(db dbm.DB, logger log.Logger, key types.StoreKey, id types.CommitID, lazyLoading bool, initialVersion uint64, cacheSize int) (types.CommitKVStore, error) {
+func LoadStoreWithInitialVersion(db dbm.DB, id types.CommitID, lazyLoading bool, initialVersion uint64, cacheSize int) (types.CommitKVStore, error) {
 	tree, err := iavl.NewMutableTreeWithOpts(db, cacheSize, &iavl.Options{InitialVersion: initialVersion})
 	if err != nil {
 		return nil, err
-	}
-
-	if tree.IsUpgradeable() && logger != nil {
-		logger.Info(
-			"Upgrading IAVL storage for faster queries + execution on live state. This may take a while",
-			"store_key", key.String(),
-			"version", initialVersion,
-			"commit", fmt.Sprintf("%X", id),
-			"is_lazy", lazyLoading,
-		)
 	}
 
 	if lazyLoading {
@@ -74,10 +63,6 @@ func LoadStoreWithInitialVersion(db dbm.DB, logger log.Logger, key types.StoreKe
 
 	if err != nil {
 		return nil, err
-	}
-
-	if logger != nil {
-		logger.Debug("Finished loading IAVL tree")
 	}
 
 	return &Store{
@@ -188,7 +173,8 @@ func (st *Store) Set(key, value []byte) {
 // Implements types.KVStore.
 func (st *Store) Get(key []byte) []byte {
 	defer telemetry.MeasureSince(time.Now(), "store", "iavl", "get")
-	return st.tree.Get(key)
+	_, value := st.tree.Get(key)
+	return value
 }
 
 // Implements types.KVStore.
@@ -211,19 +197,31 @@ func (st *Store) DeleteVersions(versions ...int64) error {
 }
 
 // Implements types.KVStore.
-// CONTRACT: Caller must release the iavlIterator, as each one creates a new
-// goroutine.
-// CONTRACT: There must be no writes to the store while an iterator is not closed.
 func (st *Store) Iterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, true)
+	var iTree *iavl.ImmutableTree
+
+	switch tree := st.tree.(type) {
+	case *immutableTree:
+		iTree = tree.ImmutableTree
+	case *iavl.MutableTree:
+		iTree = tree.ImmutableTree
+	}
+
+	return newIAVLIterator(iTree, start, end, true)
 }
 
 // Implements types.KVStore.
-// CONTRACT: Caller must release the iavlIterator, as each one creates a new
-// goroutine.
-// CONTRACT: There must be no writes to the store while an iterator is not closed.
 func (st *Store) ReverseIterator(start, end []byte) types.Iterator {
-	return st.tree.Iterator(start, end, false)
+	var iTree *iavl.ImmutableTree
+
+	switch tree := st.tree.(type) {
+	case *immutableTree:
+		iTree = tree.ImmutableTree
+	case *iavl.MutableTree:
+		iTree = tree.ImmutableTree
+	}
+
+	return newIAVLIterator(iTree, start, end, false)
 }
 
 // SetInitialVersion sets the initial version of the IAVL tree. It is used when
@@ -298,7 +296,7 @@ func (st *Store) Query(req abci.RequestQuery) (res abci.ResponseQuery) {
 			break
 		}
 
-		res.Value = tree.GetVersioned(key, res.Height)
+		_, res.Value = tree.GetVersioned(key, res.Height)
 		if !req.Prove {
 			break
 		}
@@ -378,7 +376,17 @@ func getProofFromTree(tree *iavl.MutableTree, key []byte, exists bool) *tmcrypto
 
 // Implements types.Iterator.
 type iavlIterator struct {
-	dbm.Iterator
+	*iavl.Iterator
 }
 
 var _ types.Iterator = (*iavlIterator)(nil)
+
+// newIAVLIterator will create a new iavlIterator.
+// CONTRACT: Caller must release the iavlIterator, as each one creates a new
+// goroutine.
+func newIAVLIterator(tree *iavl.ImmutableTree, start, end []byte, ascending bool) *iavlIterator {
+	iter := &iavlIterator{
+		Iterator: tree.Iterator(start, end, ascending),
+	}
+	return iter
+}

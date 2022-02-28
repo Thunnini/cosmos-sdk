@@ -2,7 +2,6 @@ package types_test
 
 import (
 	"bytes"
-	"github.com/tendermint/tendermint/libs/log"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,7 +13,7 @@ import (
 
 func initTestStores(t *testing.T) (types.KVStore, types.KVStore) {
 	db := dbm.NewMemDB()
-	ms := rootmulti.NewStore(db, log.NewNopLogger())
+	ms := rootmulti.NewStore(db)
 
 	key1 := types.NewKVStoreKey("store1")
 	key2 := types.NewKVStoreKey("store2")
