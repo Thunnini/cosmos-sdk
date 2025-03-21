@@ -326,6 +326,8 @@ func Sign(ctx context.Context, txf Factory, name string, txBuilder client.TxBuil
 	if err != nil {
 		return err
 	}
+	print(bytesToSign)
+	print(string(bytesToSign))
 
 	// Sign those bytes
 	sigBytes, _, err := txf.keybase.Sign(name, bytesToSign, signMode)
